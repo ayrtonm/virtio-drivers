@@ -1,5 +1,5 @@
 use super::{
-    protocol::VsockAddr, vsock::ConnectionInfo, DisconnectReason, SocketError, VirtIOSocket,
+    protocol::VsockAddr, vsock::{ConnectionInfo, VsockManager}, DisconnectReason, SocketError, VirtIOSocket,
     VsockEvent, VsockEventType, DEFAULT_RX_BUFFER_SIZE,
 };
 use crate::{transport::Transport, Hal, Result};
@@ -43,12 +43,18 @@ const DEFAULT_PER_CONNECTION_BUFFER_CAPACITY: u32 = 1024;
 /// # Ok(())
 /// # }
 /// ```
-pub struct VsockConnectionManager<
+pub type VsockConnectionManager<
+    // TODO: type alias bounds are not enforced so these are purely for documentation purposes.
+    // VirtIOSocket on the rhs does enforces them, but the lhs currently generates a warning. We
+    // should either suppress the warning or make this a struct with a single field instead (using
+    // either Deref or manually delegating to the field for method implementations).
     H: Hal,
     T: Transport,
     const RX_BUFFER_SIZE: usize = DEFAULT_RX_BUFFER_SIZE,
-> {
-    driver: VirtIOSocket<H, T, RX_BUFFER_SIZE>,
+> = VsockConnectionManagerCommon<VirtIOSocket<H, T, RX_BUFFER_SIZE>>;
+
+pub struct VsockConnectionManagerCommon<D: VsockManager> {
+    driver: D,
     per_connection_buffer_capacity: u32,
     connections: Vec<Connection>,
     listening_ports: Vec<u32>,
@@ -101,7 +107,9 @@ impl<H: Hal, T: Transport, const RX_BUFFER_SIZE: usize>
     pub fn guest_cid(&self) -> u64 {
         self.driver.guest_cid()
     }
+}
 
+impl<D: VsockManager> VsockConnectionManagerCommon<D> {
     /// Allows incoming connections on the given port number.
     pub fn listen(&mut self, port: u32) {
         if !self.listening_ports.contains(&port) {
@@ -144,7 +152,7 @@ impl<H: Hal, T: Transport, const RX_BUFFER_SIZE: usize>
 
     /// Polls the vsock device to receive data or other updates.
     pub fn poll(&mut self) -> Result<Option<VsockEvent>> {
-        let guest_cid = self.driver.guest_cid();
+        let guest_cid = self.driver.local_cid();
         let connections = &mut self.connections;
         let per_connection_buffer_capacity = self.per_connection_buffer_capacity;
 
