@@ -41,6 +41,16 @@ impl<H: Hal> Dma<H> {
         })
     }
 
+    pub unsafe fn map(paddr: PhysAddr, pages: usize, direction: BufferDirection) -> Result<Self> {
+        let vaddr = H::map_pages(paddr, pages, direction)?;
+        Ok(Self {
+            paddr,
+            vaddr,
+            pages,
+            _hal: PhantomData,
+        })
+    }
+
     /// Returns the physical address of the start of the DMA region, as seen by devices.
     pub fn paddr(&self) -> usize {
         self.paddr
@@ -138,6 +148,9 @@ pub unsafe trait Hal {
     /// any other thread for the duration of this method call. The `paddr` must be the value
     /// previously returned by the corresponding `share` call.
     unsafe fn unshare(paddr: PhysAddr, buffer: NonNull<[u8]>, direction: BufferDirection);
+
+    /// Map pages shared by the other side.
+    unsafe fn map_pages(paddr: PhysAddr, pages: usize, direction: BufferDirection) -> Result<NonNull<u8>>;
 }
 
 /// The direction in which a buffer is passed.

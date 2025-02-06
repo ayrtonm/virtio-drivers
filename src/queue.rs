@@ -572,6 +572,17 @@ enum VirtQueueLayout<H: Hal> {
 }
 
 impl<H: Hal> VirtQueueLayout<H> {
+    unsafe fn map_legacy(queue_size: u16, paddr: PhysAddr) -> Result<Self> {
+        let (desc, avail, used) = queue_part_sizes(queue_size);
+        let size = align_up(desc + avail) + align_up(used);
+        // Allocate contiguous pages.
+        let dma = unsafe { Dma::map(paddr, size / PAGE_SIZE, BufferDirection::Both)? };
+        Ok(Self::Legacy {
+            dma,
+            avail_offset: desc,
+            used_offset: align_up(desc + avail),
+        })
+    }
     /// Allocates a single DMA region containing all parts of the virtqueue, following the layout
     /// required by legacy interfaces.
     ///
