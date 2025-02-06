@@ -4,6 +4,7 @@
 use super::error::SocketError;
 use super::protocol::{
     Feature, StreamShutdown, VirtioVsockConfig, VirtioVsockHdr, VirtioVsockOp, VsockAddr,
+    VMADDR_CID_HOST,
 };
 use super::DEFAULT_RX_BUFFER_SIZE;
 use crate::config::read_config;
@@ -339,7 +340,6 @@ pub trait VsockManager {
         self.send_packet_to_queue(&header, &[])?;
         Ok(())
     }
-
 }
 
 impl<H: Hal, T: Transport, const RX_BUFFER_SIZE: usize> VsockManager
@@ -357,6 +357,73 @@ impl<H: Hal, T: Transport, const RX_BUFFER_SIZE: usize> VsockManager
         handler: impl FnOnce(VsockEvent, &[u8]) -> Result<Option<VsockEvent>>,
     ) -> Result<Option<VsockEvent>> {
         self.rx.poll(&mut self.transport, |buffer| {
+            let (header, body) = read_header_and_body(buffer)?;
+            VsockEvent::from_header(&header).and_then(|event| handler(event, body))
+        })
+    }
+}
+
+use crate::PhysAddr;
+
+pub struct VirtIOSocketDevice<H: Hal> {
+    rx: VirtQueue<H, { QUEUE_SIZE }>,
+    tx: OwningQueue<H, { QUEUE_SIZE }, DEFAULT_RX_BUFFER_SIZE>,
+    event: VirtQueue<H, { QUEUE_SIZE }>,
+}
+
+impl<H: Hal> VirtIOSocketDevice<H> {
+    // TODO: this should use a device-side Transport trait to figure out the descr paddrs from the queue indices or be unsafe
+    pub fn new(
+        rx_descr_paddr: PhysAddr,
+        tx_descr_paddr: PhysAddr,
+        event_descr_paddr: PhysAddr,
+    ) -> Result<Self> {
+        let rx = VirtQueue::new_device_side(
+            RX_QUEUE_IDX,
+            false, /* indirect desc */
+            false, /* event_idx feature */
+            rx_descr_paddr,
+        )?;
+        let tx = VirtQueue::new_device_side(
+            TX_QUEUE_IDX,
+            false, /* indirect desc */
+            false, /* event_idx feature */
+            tx_descr_paddr,
+        )?;
+        let event = VirtQueue::new_device_side(
+            EVENT_QUEUE_IDX,
+            false, /* indirect desc */
+            false, /* event_idx feature */
+            event_descr_paddr,
+        )?;
+
+        let tx = OwningQueue::new(tx)?;
+
+        Ok(Self { rx, tx, event })
+    }
+}
+
+impl<H: Hal> VsockManager for VirtIOSocketDevice<H> {
+    fn local_cid(&self) -> u64 {
+        VMADDR_CID_HOST
+    }
+
+    fn send_packet_to_queue(&mut self, header: &VirtioVsockHdr, buffer: &[u8]) -> Result {
+        let _len = if buffer.is_empty() {
+            self.rx
+                .add_notify_wait_pop_device(&[header.as_bytes()])?
+        } else {
+            self.rx
+                .add_notify_wait_pop_device(&[header.as_bytes(), buffer])?
+        };
+        Ok(())
+    }
+
+    fn poll(
+        &mut self,
+        handler: impl FnOnce(VsockEvent, &[u8]) -> Result<Option<VsockEvent>>,
+    ) -> Result<Option<VsockEvent>> {
+        self.tx.poll_device(|buffer| {
             let (header, body) = read_header_and_body(buffer)?;
             VsockEvent::from_header(&header).and_then(|event| handler(event, body))
         })
