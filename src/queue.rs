@@ -229,6 +229,7 @@ impl<H: Hal, const SIZE: usize> VirtQueue<H, SIZE> {
         inputs: &'a [&'b [u8]],
         outputs: &'a mut [&'b mut [u8]],
     ) -> Result<u16> {
+        assert!(!self.device_side);
         if inputs.is_empty() && outputs.is_empty() {
             return Err(Error::InvalidParam);
         }
@@ -283,6 +284,7 @@ impl<H: Hal, const SIZE: usize> VirtQueue<H, SIZE> {
         inputs: &'a [&'b [u8]],
         outputs: &'a mut [&'b mut [u8]],
     ) -> u16 {
+        assert!(!self.device_side);
         // allocate descriptors from free list
         let head = self.free_head;
         let mut last = self.free_head;
@@ -320,6 +322,7 @@ impl<H: Hal, const SIZE: usize> VirtQueue<H, SIZE> {
         inputs: &'a [&'b [u8]],
         outputs: &'a mut [&'b mut [u8]],
     ) -> u16 {
+        assert!(!self.device_side);
         let head = self.free_head;
 
         // Allocate and fill in indirect descriptor list.
@@ -375,6 +378,7 @@ impl<H: Hal, const SIZE: usize> VirtQueue<H, SIZE> {
         outputs: &'a mut [&'a mut [u8]],
         transport: &mut impl Transport,
     ) -> Result<u32> {
+        assert!(!self.device_side);
         // Safe because we don't return until the same token has been popped, so the buffers remain
         // valid and are not otherwise accessed until then.
         let token = unsafe { self.add(inputs, outputs) }?;
@@ -394,10 +398,30 @@ impl<H: Hal, const SIZE: usize> VirtQueue<H, SIZE> {
         unsafe { self.pop_used(token, inputs, outputs) }
     }
 
+    pub fn add_notify_wait_pop_device<'a>(
+        &mut self,
+        inputs: &'a [&'a [u8]],
+    ) -> Result<u32> {
+        assert!(self.device_side);
+        let mut outputs = [];
+        let outputs = &mut outputs;
+
+        let token = unsafe { self.add(inputs, outputs) }?;
+
+        // TODO: notify
+
+        while !self.can_pop() {
+            spin_loop();
+        }
+
+        unsafe { self.pop_avail(token) }
+    }
+
     /// Advise the device whether used buffer notifications are needed.
     ///
     /// See Virtio v1.1 2.6.7 Used Buffer Notification Suppression
     pub fn set_dev_notify(&mut self, enable: bool) {
+        assert!(!self.device_side);
         let avail_ring_flags = if enable { 0x0000 } else { 0x0001 };
         if !self.event_idx {
             // Safe because self.avail points to a valid, aligned, initialised, dereferenceable, readable
@@ -415,6 +439,7 @@ impl<H: Hal, const SIZE: usize> VirtQueue<H, SIZE> {
     ///
     /// This will be false if the device has supressed notifications.
     pub fn should_notify(&self) -> bool {
+        assert!(!self.device_side);
         if self.event_idx {
             // Safe because self.used points to a valid, aligned, initialised, dereferenceable, readable
             // instance of UsedRing.
@@ -430,6 +455,7 @@ impl<H: Hal, const SIZE: usize> VirtQueue<H, SIZE> {
     /// Copies the descriptor at the given index from `desc_shadow` to `desc`, so it can be seen by
     /// the device.
     fn write_desc(&mut self, index: u16) {
+        assert!(!self.device_side);
         let index = usize::from(index);
         // Safe because self.desc is properly aligned, dereferenceable and initialised, and nothing
         // else reads or writes the descriptor during this block.
@@ -440,14 +466,21 @@ impl<H: Hal, const SIZE: usize> VirtQueue<H, SIZE> {
 
     /// Returns whether there is a used element that can be popped.
     pub fn can_pop(&self) -> bool {
-        // Safe because self.used points to a valid, aligned, initialised, dereferenceable, readable
-        // instance of UsedRing.
-        self.last_used_idx != unsafe { (*self.used.as_ptr()).idx.load(Ordering::Acquire) }
+        if self.device_side {
+            // Safe because self.avail points to a valid, aligned, initialised, dereferenceable, readable
+            // instance of AvailRing.
+            self.avail_idx != unsafe { (*self.avail.as_ptr()).idx.load(Ordering::Acquire) }
+        } else {
+            // Safe because self.used points to a valid, aligned, initialised, dereferenceable, readable
+            // instance of UsedRing.
+            self.last_used_idx != unsafe { (*self.used.as_ptr()).idx.load(Ordering::Acquire) }
+        }
     }
 
     /// Returns the descriptor index (a.k.a. token) of the next used element without popping it, or
     /// `None` if the used ring is empty.
     pub fn peek_used(&self) -> Option<u16> {
+        assert!(!self.device_side);
         if self.can_pop() {
             let last_used_slot = self.last_used_idx & (SIZE as u16 - 1);
             // Safe because self.used points to a valid, aligned, initialised, dereferenceable,
@@ -458,8 +491,23 @@ impl<H: Hal, const SIZE: usize> VirtQueue<H, SIZE> {
         }
     }
 
+    /// Returns the descriptor index (a.k.a. token) of the next avail element without popping it, or
+    /// `None` if the used ring is empty.
+    pub fn peek_avail(&self) -> Option<u16> {
+        assert!(self.device_side);
+        if self.can_pop() {
+            let avail_slot = self.avail_idx & (SIZE as u16 - 1);
+            // Safe because self.used points to a valid, aligned, initialised, dereferenceable,
+            // readable instance of AvailRing.
+            Some(unsafe { (*self.avail.as_ptr()).ring[avail_slot as usize] })
+        } else {
+            None
+        }
+    }
+
     /// Returns the number of free descriptors.
     pub fn available_desc(&self) -> usize {
+        assert!(!self.device_side);
         #[cfg(feature = "alloc")]
         if self.indirect {
             return if usize::from(self.num_used) == SIZE {
@@ -488,6 +536,7 @@ impl<H: Hal, const SIZE: usize> VirtQueue<H, SIZE> {
         inputs: &'a [&'a [u8]],
         outputs: &'a mut [&'a mut [u8]],
     ) {
+        assert!(!self.device_side);
         let original_free_head = self.free_head;
         self.free_head = head;
 
@@ -577,6 +626,7 @@ impl<H: Hal, const SIZE: usize> VirtQueue<H, SIZE> {
         inputs: &'a [&'a [u8]],
         outputs: &'a mut [&'a mut [u8]],
     ) -> Result<u32> {
+        assert!(!self.device_side);
         if !self.can_pop() {
             return Err(Error::NotReady);
         }
@@ -612,6 +662,46 @@ impl<H: Hal, const SIZE: usize> VirtQueue<H, SIZE> {
         }
 
         Ok(len)
+    }
+
+    pub unsafe fn pop_avail<'a>(
+        &mut self,
+        token: u16,
+    ) -> Result<u32> {
+        assert!(self.device_side);
+        if !self.can_pop() {
+            return Err(Error::NotReady);
+        }
+
+        // Get the index of the start of the descriptor chain for the next element in the used ring.
+        let avail_slot = self.avail_idx & (SIZE as u16 - 1);
+        let index;
+        // Safe because self.used points to a valid, aligned, initialised, dereferenceable, readable
+        // instance of UsedRing.
+        unsafe {
+            index = (*self.avail.as_ptr()).ring[avail_slot as usize];
+        }
+
+        if index != token {
+            // The device used a different descriptor chain to the one we were expecting.
+            return Err(Error::WrongToken);
+        }
+
+        //// Safe because the caller ensures the buffers are valid and match the descriptor.
+        //unsafe {
+        //    self.recycle_descriptors(index, inputs, outputs);
+        //}
+        self.avail_idx = self.avail_idx.wrapping_add(1);
+
+        //if self.event_idx {
+        //    unsafe {
+        //        (*self.avail.as_ptr())
+        //            .used_event
+        //            .store(self.last_used_idx, Ordering::Release);
+        //    }
+        //}
+
+        Ok(0)
     }
 }
 
