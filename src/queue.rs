@@ -62,6 +62,7 @@ pub struct VirtQueue<H: Hal, const SIZE: usize> {
     indirect: bool,
     #[cfg(feature = "alloc")]
     indirect_lists: [Option<NonNull<[Descriptor]>>; SIZE],
+    device_side: bool,
 }
 
 impl<H: Hal, const SIZE: usize> VirtQueue<H, SIZE> {
@@ -139,6 +140,77 @@ impl<H: Hal, const SIZE: usize> VirtQueue<H, SIZE> {
             indirect,
             #[cfg(feature = "alloc")]
             indirect_lists: [NONE; SIZE],
+            device_side: false,
+        })
+    }
+
+    pub fn new_device_side(
+        idx: u16,
+        indirect: bool,
+        event_idx: bool,
+        paddr: PhysAddr,
+    ) -> Result<Self> {
+        #[allow(clippy::let_unit_value)]
+        let _ = Self::SIZE_OK;
+
+        //if transport.queue_used(idx) {
+        //    return Err(Error::AlreadyUsed);
+        //}
+        //if transport.max_queue_size(idx) < SIZE as u32 {
+        //    return Err(Error::InvalidParam);
+        //}
+        let size = SIZE as u16;
+
+        let layout = unsafe {//if transport.requires_legacy_layout() {
+            VirtQueueLayout::map_legacy(size, paddr)?
+        };
+        //} else {
+        //    VirtQueueLayout::allocate_flexible(size)?
+        //};
+
+        //transport.queue_set(
+        //    idx,
+        //    size.into(),
+        //    layout.descriptors_paddr(),
+        //    layout.driver_area_paddr(),
+        //    layout.device_area_paddr(),
+        //);
+
+        let desc =
+            nonnull_slice_from_raw_parts(layout.descriptors_vaddr().cast::<Descriptor>(), SIZE);
+        let avail = layout.avail_vaddr().cast();
+        let used = layout.used_vaddr().cast();
+
+        let mut desc_shadow: [Descriptor; SIZE] = FromZeros::new_zeroed();
+        // Link descriptors together.
+        for i in 0..(size - 1) {
+            desc_shadow[i as usize].next = i + 1;
+            // Safe because `desc` is properly aligned, dereferenceable, initialised, and the device
+            // won't access the descriptors for the duration of this unsafe block.
+            unsafe {
+                (*desc.as_ptr())[i as usize].next = i + 1;
+            }
+        }
+
+        #[cfg(feature = "alloc")]
+        const NONE: Option<NonNull<[Descriptor]>> = None;
+        Ok(VirtQueue {
+            layout,
+            desc,
+            avail,
+            used,
+            queue_idx: idx,
+            num_used: 0,
+            free_head: 0,
+            desc_shadow,
+            avail_idx: 0,
+            last_used_idx: 0,
+            event_idx,
+            #[cfg(feature = "alloc")]
+            indirect,
+            #[cfg(feature = "alloc")]
+            indirect_lists: [NONE; SIZE],
+            device_side: true,
         })
     }
 
