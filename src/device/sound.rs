@@ -77,7 +77,7 @@ impl<H: Hal, T: Transport> VirtIOSound<H, T> {
             negotiated_features.contains(Feature::RING_EVENT_IDX),
             negotiated_features.contains(Feature::ACCESS_PLATFORM),
         )?;
-        let event_queue = OwningQueue::new(VirtQueue::new(
+        let mut event_queue = OwningQueue::new(VirtQueue::new(
             &mut transport,
             EVENT_QUEUE_IDX,
             negotiated_features.contains(Feature::RING_INDIRECT_DESC),

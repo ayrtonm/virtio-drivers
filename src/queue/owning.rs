@@ -37,7 +37,7 @@ impl<H: Hal, const SIZE: usize, const BUFFER_SIZE: usize> OwningQueue<H, SIZE, B
     /// virtqueue.
     ///
     /// This will be false if the device has suppressed notifications.
-    pub fn should_notify(&self) -> bool {
+    pub fn should_notify(&mut self) -> bool {
         self.queue.should_notify()
     }
 
@@ -144,7 +144,7 @@ where
 {
 }
 
-// SAFETY: An `&OwningQueue` only allows calling `should_notify`.
+// SAFETY: An `&OwningQueue` doesn't allow any access to the queue or buffers.
 unsafe impl<H: Hal, const SIZE: usize, const BUFFER_SIZE: usize> Sync
     for OwningQueue<H, SIZE, BUFFER_SIZE>
 where

@@ -61,6 +61,9 @@ pub struct VirtQueue<H: Hal, const SIZE: usize> {
     desc_shadow: [Descriptor; SIZE],
     /// Our trusted copy of `avail.idx`.
     avail_idx: u16,
+    /// The value of `avail_idx` the last time `should_notify` was called, used to determine whether
+    /// `avail_event` has been passed since then.
+    notify_check_idx: u16,
     last_used_idx: u16,
     /// Whether the `VIRTIO_F_EVENT_IDX` feature has been negotiated.
     event_idx: bool,
@@ -142,6 +145,7 @@ impl<H: Hal, const SIZE: usize> VirtQueue<H, SIZE> {
             free_head: 0,
             desc_shadow,
             avail_idx: 0,
+            notify_check_idx: 0,
             last_used_idx: 0,
             event_idx,
             access_platform,
@@ -357,12 +361,22 @@ impl<H: Hal, const SIZE: usize> VirtQueue<H, SIZE> {
     /// virtqueue.
     ///
     /// This will be false if the device has suppressed notifications.
-    pub fn should_notify(&self) -> bool {
+    ///
+    /// If `VIRTIO_F_EVENT_IDX` has been negotiated, this only returns true once for the buffers added
+    /// since the previous call, so the caller must notify the device whenever it returns true.
+    pub fn should_notify(&mut self) -> bool {
         if self.event_idx {
             // SAFETY: `self.used` points to a valid, aligned, initialised, dereferenceable, readable
             // instance of `UsedRing`.
             let avail_event = unsafe { (*self.used.as_ptr()).avail_event.load(Ordering::Acquire) };
-            self.avail_idx >= avail_event.wrapping_add(1)
+            let old_idx = self.notify_check_idx;
+            self.notify_check_idx = self.avail_idx;
+            // Notify if `avail_event` is in the range `[old_idx, avail_idx)`, taking wrapping into
+            // account.
+            //
+            // Ref: Virtio v1.1 2.6.7.1 / linux vring_need_event
+            self.avail_idx.wrapping_sub(avail_event).wrapping_sub(1)
+                < self.avail_idx.wrapping_sub(old_idx)
         } else {
             // SAFETY: `self.used` points to a valid, aligned, initialised, dereferenceable, readable
             // instance of `UsedRing`.
@@ -1316,5 +1330,55 @@ mod tests {
 
         // Check that the transport should be notified again now.
         assert_eq!(queue.should_notify(), true);
+    }
+
+    /// Tests that `avail_event` is handled correctly when the available index wraps around.
+    #[test]
+    fn add_notify_event_idx_wrap() {
+        let state = Arc::new(Mutex::new(State::new(vec![QueueStatus::default()], ())));
+        let mut transport = FakeTransport {
+            device_type: DeviceType::Block,
+            max_queue_size: 4,
+            device_features: Feature::RING_EVENT_IDX.bits(),
+            state: state.clone(),
+        };
+        let mut queue =
+            VirtQueue::<FakeHal, 4>::new(&mut transport, 0, false, true, false).unwrap();
+
+        // Move the available index to just before it wraps around.
+        queue.avail_idx = 0xfffe;
+        queue.notify_check_idx = 0xfffe;
+
+        // SAFETY: the various parts of the queue are properly aligned, dereferenceable and
+        // initialised, and nothing else is accessing them at the same time.
+        unsafe {
+            (*queue.used.as_ptr())
+                .avail_event
+                .store(0xffff, Ordering::Release);
+        }
+
+        // Nothing has been added, so the device shouldn't be notified.
+        assert_eq!(queue.should_notify(), false);
+
+        // SAFETY: the various parts of the queue are properly aligned, dereferenceable and
+        // initialised, and nothing else is accessing them at the same time.
+        unsafe {
+            (*queue.used.as_ptr())
+                .avail_event
+                .store(0xfffe, Ordering::Release);
+        }
+
+        // Add two buffer chains before checking, so the available index wraps to 0 and skips over
+        // `avail_event + 1`.
+        // SAFETY: The buffers are static and are never popped or accessed through the queue.
+        unsafe { queue.add(&[&[42]], &mut []) }.unwrap();
+        // SAFETY: As above.
+        unsafe { queue.add(&[&[42]], &mut []) }.unwrap();
+        assert_eq!(queue.avail_idx, 0);
+
+        // Check that the transport would be notified.
+        assert_eq!(queue.should_notify(), true);
+        // But not again for the same buffers.
+        assert_eq!(queue.should_notify(), false);
     }
 }
